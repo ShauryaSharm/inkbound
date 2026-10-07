@@ -1,0 +1,16 @@
+{
+  "name": "Inkbound",
+  "short_name": "Inkbound",
+  "description": "Battle your way through lit and rhetoric terms, plus 10 SAT words a week.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1B3346",
+  "theme_color": "#1B3346",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
