@@ -1,5 +1,5 @@
 // Offline cache. Bump VERSION whenever you change any app file so phones pick up the update.
-const VERSION='inkbound-v1';
+const VERSION='inkbound-v2';
 const CORE=['./','index.html','terms.js','words.js','manifest.webmanifest','icons/icon-192.png','icons/apple-touch-icon.png'];
 
 self.addEventListener('install',e=>{e.waitUntil(caches.open(VERSION).then(c=>c.addAll(CORE)).then(()=>self.skipWaiting()))});

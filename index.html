@@ -328,8 +328,9 @@ const KEY='inkbound:v1';
 const DEFAULT=()=>({v:1,xp:0,coins:0,lvl:1,streak:{count:0,last:null,freezes:0,best:0},terms:{},nodes:{},daily:null,dev:{played:0,won:0,run:0,best:0},best:{speed:0,tower:0,pair:0},sat:null,avatar:'🦉',owned:['🦉','🦊','🐸'],settings:{sound:true,rate:0.9},intro:false,iosTip:false,updatedAt:0});
 function migrate(s){const d=DEFAULT();if(!s||typeof s!=='object')return d;return{...d,...s,streak:{...d.streak,...s.streak},dev:{...d.dev,...s.dev},best:{...d.best,...s.best},settings:{...d.settings,...s.settings},terms:s.terms||{},nodes:s.nodes||{},owned:s.owned||d.owned}}
 let S;try{S=migrate(JSON.parse(localStorage.getItem(KEY)))}catch(e){S=DEFAULT()}
-function save(){S.updatedAt=Date.now();try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}}
+function save(){S.updatedAt=Date.now();try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}if(USER)schedulePush()}
 let view='today',tab='today',R=null,A=null,L=null,RES=null,wIdx=0,wFlip=false,confirmReset=false,scrollMap=false,AT=null,TT=null;
+let FB=null,USER=null,fbLoading=null,pendingAuth=null,pushT=null,syncState='off',ACC={mode:'signup',err:'',busy:false,u:''},accBack='profile';
 const TIMEOUT='\u0000timeout';
 
 const unlocked=()=>Object.keys(S.terms).filter(id=>TB[id]);
@@ -562,6 +563,71 @@ function updateSug(){
   box.innerHTML=m.length?m.map(n=>`<button data-act="dguess" data-id="${esc(n)}">${esc(n)}</button>`).join(''):`<p class="muted" style="padding:6px">No term matches “${esc(v)}”</p>`;
 }
 
+// ================= accounts (Firebase Auth + Firestore) =================
+// Paste the firebaseConfig object from Firebase console here. These values are public by design;
+// Firestore security rules are what keep each player's save private.
+const FB_CONFIG={apiKey:'AIzaSyBUSbkcIz6oxT6ca6v_r-wGE0NHhkizQ9g',authDomain:'inkbound-5758b.firebaseapp.com',projectId:'inkbound-5758b',storageBucket:'inkbound-5758b.firebasestorage.app',messagingSenderId:'141106272444',appId:'1:141106272444:web:d3293e0dcb7c725ffed8b9'};
+const FBV='10.12.2',UNAME_RE=/^[A-Za-z0-9_]{3,20}$/;
+const toEmail=n=>n.toLowerCase()+'@players.inkbound.app';
+const uname=()=>USER&&USER.email?USER.email.split('@')[0]:'';
+function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=rej;document.head.append(s)})}
+function fbInit(){
+  if(!FB_CONFIG)return Promise.resolve(null);if(fbLoading)return fbLoading;
+  fbLoading=(async()=>{
+    const b=`https://www.gstatic.com/firebasejs/${FBV}/`;
+    await loadScript(b+'firebase-app-compat.js');await Promise.all([loadScript(b+'firebase-auth-compat.js'),loadScript(b+'firebase-firestore-compat.js')]);
+    firebase.initializeApp(FB_CONFIG);FB={auth:firebase.auth(),db:firebase.firestore()};
+    FB.auth.onAuthStateChanged(u=>{USER=u;if(!u){syncState='off'}else if(!pendingAuth)pullRemote();if(view==='profile')render()});
+    return FB;
+  })().catch(()=>{fbLoading=null;return null});
+  return fbLoading;
+}
+const saveDoc=()=>FB.db.collection('saves').doc(USER.uid);
+function schedulePush(){clearTimeout(pushT);pushT=setTimeout(pushNow,2000)}
+async function pushNow(){
+  clearTimeout(pushT);if(!FB||!USER)return;syncState='syncing';
+  try{await saveDoc().set({username:uname(),json:JSON.stringify(S),updatedAt:S.updatedAt});syncState='ok'}catch(e){syncState='error'}
+  if(view==='profile')render();
+}
+function applyRemote(d){S=migrate(JSON.parse(d.json));S.updatedAt=d.updatedAt;try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}ensureDaily();ensureSat()}
+// On app open: whichever copy is newer wins. On explicit login: the account's copy always wins.
+async function pullRemote(force){
+  if(!FB||!USER)return;syncState='syncing';
+  try{
+    const snap=await saveDoc().get();
+    if(snap.exists){const d=snap.data();if(force||(d.updatedAt>S.updatedAt&&!R&&!A)){applyRemote(d);if(!['account','battle','speed','pair'].includes(view))render()}else if(S.updatedAt>d.updatedAt)await pushNow()}
+    else await pushNow();
+    syncState='ok';
+  }catch(e){syncState='error'}
+  if(view==='profile')render();
+}
+function authMsg(e){const c=e&&e.code||'';
+  if(c.includes('email-already-in-use'))return 'That username is taken. Try another one.';
+  if(/invalid-credential|wrong-password|user-not-found|invalid-login/.test(c))return 'Wrong username or password.';
+  if(c.includes('weak-password'))return 'Password needs at least 6 characters.';
+  if(c.includes('network'))return 'No internet connection.';
+  if(c.includes('too-many-requests'))return 'Too many tries. Wait a minute and try again.';
+  return 'Something went wrong. Try again.'}
+async function accSubmit(){
+  if(ACC.busy)return;const u=$('#un').value.trim(),p=$('#pw').value;ACC.u=u;
+  const fail=m=>{ACC.err=m;ACC.busy=false;pendingAuth=null;render();const f=$(m.includes('Password')?'#pw':'#un');if(f)f.focus()};
+  if(!UNAME_RE.test(u))return fail('Username must be 3–20 letters, numbers, or _');
+  if(p.length<6)return fail('Password needs at least 6 characters.');
+  ACC.busy=true;ACC.err='';render();
+  const fb=await fbInit();if(!fb)return fail('Can’t reach the server. Check your internet.');
+  pendingAuth=ACC.mode;
+  try{
+    if(ACC.mode==='signup'){await fb.auth.createUserWithEmailAndPassword(toEmail(u),p);USER=fb.auth.currentUser;S.intro=true;save();await pushNow();toast(`Account created. Welcome, ${uname()}!`,'gold')}
+    else{await fb.auth.signInWithEmailAndPassword(toEmail(u),p);USER=fb.auth.currentUser;await pullRemote(true);S.intro=true;toast(`Welcome back, ${uname()}!`,'gold')}
+  }catch(e){return fail(authMsg(e))}
+  pendingAuth=null;ACC={mode:'login',err:'',busy:false,u:''};tab='today';view='today';render();
+}
+async function logOut(){
+  await pushNow();try{await FB.auth.signOut()}catch(e){}
+  USER=null;const st=S.settings;S=DEFAULT();S.settings=st;S.intro=true;ensureDaily();ensureSat();save();
+  closeModal();tab='today';view='today';render();toast('Logged out');
+}
+
 // ================= ui helpers =================
 function toast(msg,cls){const t=document.createElement('div');t.className='toast '+(cls||'');t.textContent=msg;$('#toasts').append(t);setTimeout(()=>t.remove(),2900)}
 function modal(html){const m=$('#modal');m.querySelector('.sheet').innerHTML=html;m.classList.add('on')}
@@ -583,9 +649,9 @@ function nav(){const t=[['today','☀️','Today'],['map','🗺️','Quest'],['a
 // ================= render =================
 const app=$('#app');
 function render(){
-  const full=['learn','battle','results','speed','pair','device','wstudy','intro'].includes(view);
+  const full=['learn','battle','results','speed','pair','device','wstudy','intro','account'].includes(view);
   app.className=full?'full':'';
-  if(full)app.innerHTML=({learn:rLearn,battle:rBattle,results:rResults,speed:rSpeed,pair:rPair,device:rDevice,wstudy:rWStudy,intro:rIntro})[view]();
+  if(full)app.innerHTML=({learn:rLearn,battle:rBattle,results:rResults,speed:rSpeed,pair:rPair,device:rDevice,wstudy:rWStudy,intro:rIntro,account:rAccount})[view]();
   else app.innerHTML=header()+({today:rToday,map:rMap,arcade:rArcade,cards:rCards,words:rWords,profile:rProfile})[view]()+nav();
   if(view==='map'&&scrollMap){scrollMap=false;const c=$('.node.cur');if(c)c.scrollIntoView({block:'center'})}
   if(view==='device')updateSug();
@@ -593,7 +659,24 @@ function render(){
 function rIntro(){return `<div class="intro"><div style="display:flex;justify-content:center">${tiles('inkbound')}</div><h1>Inkbound</h1>
   <p class="muted" style="max-width:340px;margin:0 auto">Fight your way through 11 lands of literary and rhetorical terms. Every right answer is an attack. Plus 10 SAT words every week.</p>
   <h2 style="margin-top:30px">Pick your hero</h2><div class="avgrid" style="grid-template-columns:repeat(3,1fr);max-width:300px;margin:0 auto">${['🦉','🦊','🐸'].map(a=>`<button class="${S.avatar===a?'on':''}" data-act="introav" data-a="${a}">${a}</button>`).join('')}</div>
-  <button class="primary gold" data-act="introgo" style="margin-top:30px">Start my quest</button></div>`}
+  <button class="primary gold" data-act="introgo" style="margin-top:30px">Start my quest</button>
+  ${FB_CONFIG?`<button class="link" data-act="account" data-mode="login" data-back="intro" style="margin-top:14px">Already have an account? Log in</button>`:''}</div>`}
+function rAccount(){
+  const su=ACC.mode==='signup';
+  return `<div class="top"><button class="x" data-act="accclose" aria-label="Close">✕</button><span></span></div>
+  <div style="text-align:center;margin-top:10px"><div style="font-size:3rem">${S.avatar}</div><h1 style="font-size:1.8rem;margin-top:8px">${su?'Create an account':'Log in'}</h1>
+  <p class="muted" style="margin-top:6px">${su?'Save your progress and play on any device.':'Pick up right where you left off.'}</p></div>
+  <div class="row" style="margin-top:20px;background:var(--surface2);border-radius:12px;padding:4px">
+    <button class="${su?'primary':'secondary'}" style="margin:0;padding:10px;border:0" data-act="accmode" data-mode="signup">Sign up</button>
+    <button class="${su?'secondary':'primary'}" style="margin:0;padding:10px;border:0" data-act="accmode" data-mode="login">Log in</button></div>
+  <label class="muted" for="un" style="display:block;margin-top:18px;font-weight:700;font-size:.9rem">Username</label>
+  <input id="un" class="dinput" style="margin-top:6px" value="${esc(ACC.u)}" maxlength="20" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="3–20 letters, numbers, or _">
+  <label class="muted" for="pw" style="display:block;margin-top:14px;font-weight:700;font-size:.9rem">Password</label>
+  <input id="pw" class="dinput" style="margin-top:6px" type="password" autocomplete="${su?'new-password':'current-password'}" placeholder="At least 6 characters">
+  ${ACC.err?`<div class="hintline" style="background:color-mix(in srgb,var(--bad) 16%,var(--surface))">⚠️ ${esc(ACC.err)}</div>`:''}
+  <button class="primary gold" data-act="accgo" ${ACC.busy?'disabled':''}>${ACC.busy?'One sec…':su?'Create account':'Log in'}</button>
+  <p class="note">${su?'Your progress on this device moves into the new account. ':'Logging in replaces the progress on this device with your account’s. '}There’s no email, so <b>remember your password</b>: it can’t be reset.</p>`;
+}
 function rToday(){
   const st=streakNow(),pt=playedToday(),d=S.daily.dev,nn=nextNode(),due=dueCount(),u=unlocked().length;
   const ios=/iphone|ipad|ipod/i.test(navigator.userAgent)&&!navigator.standalone&&!S.iosTip;
@@ -749,6 +832,10 @@ function rProfile(){
   <button class="toggle" data-act="buyfreeze" ${S.streak.freezes>=2?'disabled':''}><span>🧊 Streak freeze <small class="muted">(saves your streak if you miss a day · have ${S.streak.freezes}/2)</small></span><strong>${S.streak.freezes>=2?'Full':'60 🪙'}</strong></button>
   <p class="muted" style="margin:12px 0 8px;font-size:.9rem">Heroes</p>
   <div class="avgrid">${AVATARS.map(([a,c])=>{const own=S.owned.includes(a);return `<button class="${S.avatar===a?'on':''} ${own?'':'lock'}" data-act="av" data-a="${a}">${a}<small>${own?(S.avatar===a?'using':'own'):c+' 🪙'}</small></button>`}).join('')}</div>
+  ${FB_CONFIG?`<h2>Account</h2>${USER
+    ?`<div class="toggle"><span>Signed in as <b>${esc(uname())}</b><br><small class="muted">${{ok:'✓ Progress synced',syncing:'Syncing…',error:'⚠️ Couldn’t sync. Will retry',off:''}[syncState]||''}</small></span><button class="link" data-act="logout">Log out</button></div>`
+    :`<button class="toggle" data-act="account" data-mode="signup"><span>☁️ <b>Save your progress</b><br><small class="muted">Make an account to play on any device</small></span><strong>Sign up</strong></button>
+      <button class="toggle" data-act="account" data-mode="login"><span>Already have an account?</span><strong>Log in</strong></button>`}`:''}
   <h2>Settings</h2>
   <button class="toggle" data-act="sound"><span>Sound effects</span><strong>${S.settings.sound?'On':'Off'}</strong></button>
   <button class="toggle" data-act="rate"><span>Voice speed</span><strong>${S.settings.rate<0.8?'Slow':S.settings.rate<1?'Normal':'Fast'}</strong></button>
@@ -768,6 +855,12 @@ document.addEventListener('click',e=>{
     case'mclose':closeModal();break;
     case'introav':S.avatar=el.dataset.a;save();render();break;
     case'introgo':S.intro=true;save();tab='map';view='map';scrollMap=true;render();break;
+    case'account':ACC={mode:el.dataset.mode||'signup',err:'',busy:false,u:''};accBack=el.dataset.back||'profile';view='account';render();window.scrollTo(0,0);fbInit();{const i=$('#un');if(i)i.focus()}break;
+    case'accmode':ACC.mode=el.dataset.mode;ACC.err='';ACC.u=$('#un').value;render();break;
+    case'accgo':accSubmit();break;
+    case'accclose':if(ACC.busy)break;view=accBack;if(accBack!=='intro')tab='today';render();break;
+    case'logout':modal(`<div class="panel" style="text-align:center"><h2 style="margin:0 0 6px">Log out?</h2><p class="muted">Your progress is saved to <b>${esc(uname())}</b>. This device goes back to a fresh start until you log in again.</p><button class="primary" data-act="dologout">Log out</button><button class="secondary" data-act="mclose">Cancel</button></div>`);break;
+    case'dologout':logOut();break;
     case'iosx':S.iosTip=true;save();render();break;
     case'node':{const n=NB[el.dataset.id];if(!nodeOpen(n)){toast('🔒 Clear the stop before this one first');break}
       if(n.kind==='boss'){const z=ZB[n.z];modal(`<div class="panel" style="text-align:center"><div style="font-size:4rem">${z.boss[0]}</div><h2 style="margin:6px 0">${esc(z.boss[1])}</h2><p class="muted">Boss of ${esc(z.place)}. Every ${esc(z.name.toLowerCase())} term. 25 seconds per question, 3 hearts.</p><button class="primary gold" data-act="boss" data-id="${n.id}">⚔️ Fight</button><button class="secondary" data-act="mclose">Not yet</button></div>`)}
@@ -815,16 +908,19 @@ document.addEventListener('click',e=>{
 document.addEventListener('keydown',e=>{
   if(e.key!=='Enter')return;
   if(e.target.id==='ans'){e.preventDefault();answer(e.target.value)}
+  else if(e.target.id==='un'){e.preventDefault();const p=$('#pw');if(p)p.focus()}
+  else if(e.target.id==='pw'){e.preventDefault();accSubmit()}
   else if(e.target.id==='dg'){e.preventDefault();const b=$('#sug button');if(b)devGuess(b.dataset.id)}
   else if(view==='battle'&&R&&R.answered&&!e.target.closest('input')){e.preventDefault();cont()}
 });
 document.addEventListener('input',e=>{if(e.target.id==='dg')updateSug()});
-document.addEventListener('visibilitychange',()=>{if(document.hidden||R||A)return;const d=S.daily&&S.daily.day,k=S.sat&&S.sat.k;ensureDaily();ensureSat();if(d!==S.daily.day||k!==S.sat.k)render()});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){if(USER&&pushT)pushNow();return}if(USER)pullRemote();if(R||A)return;const d=S.daily&&S.daily.day,k=S.sat&&S.sat.k;ensureDaily();ensureSat();if(d!==S.daily.day||k!==S.sat.k)render()});
 if(canSpeak)try{speechSynthesis.getVoices();speechSynthesis.onvoiceschanged=()=>{}}catch(e){}
 if('serviceWorker' in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('sw.js').catch(()=>{});
 
 ensureDaily();ensureSat();
 if(!S.intro)view='intro';
+fbInit();
 render();
 </script>
 </body>
